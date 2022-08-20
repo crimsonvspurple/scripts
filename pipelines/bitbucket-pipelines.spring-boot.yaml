@@ -1,0 +1,213 @@
+# x64 Corretto (17) with AWS CLIv2
+image: crimsonrain/deploy-corretto-awscli2-x64:latest
+
+clone:
+  depth: 5
+
+stepdifinitions:
+  - .: &setupEnv
+      name: 'Env: Setup'
+      clone:
+        enabled: false
+      script:
+        - echo export BITBUCKET_DEPLOYMENT_ENVIRONMENT=${BITBUCKET_DEPLOYMENT_ENVIRONMENT} | tee -a deploymentEnvironment.env
+
+        - echo export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} | tee -a deploymentEnvironment.env
+        - echo export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} | tee -a deploymentEnvironment.env
+        - echo export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION} | tee -a deploymentEnvironment.env
+
+        - echo export ARTIFACTORY_DOMAIN=${ARTIFACTORY_DOMAIN} | tee -a deploymentEnvironment.env
+        # - echo export ARTIFACTORY_DOMAIN_OWNER=${ARTIFACTORY_DOMAIN_OWNER} | tee -a deploymentEnvironment.env
+        # - echo export ARTIFACTORY_CONTEXT_URL=${ARTIFACTORY_CONTEXT_URL} | tee -a deploymentEnvironment.env
+        - echo export ARTIFACTORY_USER=${ARTIFACTORY_USER} | tee -a deploymentEnvironment.env
+        - echo export CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain ${ARTIFACTORY_DOMAIN} --domain-owner ${ARTIFACTORY_DOMAIN_OWNER} --query authorizationToken --output text` | tee -a deploymentEnvironment.env
+
+        - echo export AWS_ECR_REPO=${AWS_ECR_REPO} | tee -a deploymentEnvironment.env
+
+        - echo export AWS_PREFIX=${AWS_PREFIX} | tee -a deploymentEnvironment.env
+        - echo export AWS_ECS_CLUSTER=${AWS_ECS_CLUSTER} | tee -a deploymentEnvironment.env
+
+        - echo export GRADLE_OPTS=\"-Dspring.profiles.active=${BITBUCKET_DEPLOYMENT_ENVIRONMENT} -Djava.awt.headless=true -Dfile.encoding=UTF-8 -XX:-UseParallelGC -XX:TieredStopAtLevel=1 -XX:+UnlockExperimentalVMOptions -XX:MaxMetaspaceSize=512m\" | tee -a deploymentEnvironment.env
+      artifacts:
+        - deploymentEnvironment.env
+      condition:
+        changesets:
+          includePaths:
+            - "commons/**"
+            - "user/**"
+            - "core/**"
+            - "notifier/**"
+  - .: &buildComm
+      name: 'Commons: Build'
+      caches:
+        - gradle
+        - gradlewrapper
+      script:
+        - ./commons/gradlew build -x test -c commons/settings.gradle
+      condition:
+        changesets:
+          includePaths:
+            - "commons/**"
+  - .: &pubComm
+      name: 'Commons: Build -> Publish'
+      caches:
+        - gradle
+        - gradlewrapper
+      script:
+        - source deploymentEnvironment.env
+        - ./commons/gradlew publish -x test -c commons/settings.gradle
+      condition:
+        changesets:
+          includePaths:
+            - "commons/**"
+  - .: &buildServiceUser
+      services:
+        - docker
+      caches:
+        - gradle
+        - gradlewrapper
+        - docker
+      name: 'User: Build'
+      script:
+        - source deploymentEnvironment.env
+        - ./user/gradlew build -x test -c user/settings.gradle
+      condition:
+        changesets:
+          includePaths:
+            - "user/**"
+  - .: &pubServiceUser
+      services:
+        - docker
+      caches:
+        - gradle
+        - gradlewrapper
+        - docker
+      name: 'User: Build -> Dockerize (jib) -> Push'
+      script:
+        - source deploymentEnvironment.env
+        - ./user/gradlew jib -c user/settings.gradle
+        - aws ecs update-service --cluster ${AWS_ECS_CLUSTER} --service ${AWS_PREFIX}-user-svc --force-new-deployment --region ${AWS_DEFAULT_REGION} --task-definition  ${AWS_PREFIX}-user
+      condition:
+        changesets:
+          includePaths:
+            - "user/**"
+  - .: &buildServiceCore
+      services:
+        - docker
+      caches:
+        - gradle
+        - gradlewrapper
+        - docker
+      name: 'Core: Build'
+      script:
+        - source deploymentEnvironment.env
+        - ./core/gradlew build -x test -c core/settings.gradle
+      condition:
+        changesets:
+          includePaths:
+            - "core/**"
+  - .: &pubServiceCore
+      services:
+        - docker
+      caches:
+        - gradle
+        - gradlewrapper
+        - docker
+      name: 'Core: Build -> Dockerize (jib) -> Push'
+      script:
+        - source deploymentEnvironment.env
+        - ./core/gradlew jib -c core/settings.gradle
+        - aws ecs update-service --cluster ${AWS_ECS_CLUSTER} --service ${AWS_PREFIX}-core-svc --force-new-deployment --region ${AWS_DEFAULT_REGION} --task-definition  ${AWS_PREFIX}-core
+      condition:
+        changesets:
+          includePaths:
+            - "core/**"
+  - .: &buildServiceNotifier
+      services:
+        - docker
+      caches:
+        - gradle
+        - gradlewrapper
+        - docker
+      name: 'Notifier: Build'
+      script:
+        - source deploymentEnvironment.env
+        - ./core/gradlew build -x test -c notifier/settings.gradle
+      condition:
+        changesets:
+          includePaths:
+            - "notifier/**"
+  - .: &pubServiceNotifier
+      services:
+        - docker
+      caches:
+        - gradle
+        - gradlewrapper
+        - docker
+      name: 'Notifier: Build -> Dockerize (jib) -> Push'
+      script:
+        - source deploymentEnvironment.env
+        - ./notifier/gradlew jib -c notifier/settings.gradle
+        - aws ecs update-service --cluster ${AWS_ECS_CLUSTER} --service ${AWS_PREFIX}-notifier-svc --force-new-deployment --region ${AWS_DEFAULT_REGION} --task-definition  ${AWS_PREFIX}-notifier
+      condition:
+        changesets:
+          includePaths:
+            - "notifier/**"
+
+pipelines:
+  branches:
+    #    master:
+    #      - step:
+    #          <<: *setupEnv
+    #          deployment: staging
+    #      - step:
+    #          <<: *buildComm
+    #      - parallel:
+    #          - step:
+    #              <<: *buildServiceUser
+    #          - step:
+    #              <<: *buildServiceCore
+    release/staging:
+      - step:
+          <<: *setupEnv
+          deployment: staging
+      - step:
+          <<: *pubComm
+      - parallel:
+          - step:
+              <<: *pubServiceUser
+          - step:
+              <<: *pubServiceCore
+          - step:
+              <<: *pubServiceNotifier
+    release/production:
+      - step:
+          <<: *setupEnv
+          deployment: production
+      - step:
+          <<: *pubComm
+      - parallel:
+          - step:
+              <<: *pubServiceUser
+          - step:
+              <<: *pubServiceCore
+          - step:
+              <<: *pubServiceNotifier
+  pull-requests:
+    feature/*:
+      - step:
+          <<: *setupEnv
+          deployment: staging
+      - step:
+          <<: *buildComm
+      - parallel:
+          - step:
+              <<: *buildServiceUser
+          - step:
+              <<: *buildServiceCore
+          - step:
+              <<: *buildServiceNotifier
+
+definitions:
+  caches:
+    gradlewrapper: ~/.gradle/wrapper

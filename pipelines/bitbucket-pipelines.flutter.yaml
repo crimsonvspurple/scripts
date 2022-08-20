@@ -1,0 +1,140 @@
+# x64 Ubuntu with the latest Flutter and AWS CLIv2
+image: crimsonrain/deploy-flutter-web:latest
+
+clone:
+  depth: 5
+
+# Flutter pub get will infinite loop if there is any network issue
+options:
+  max-time: 10
+
+stepdifinitions:
+  - .: &setupEnv
+      name: 'Env: Setup'
+      clone:
+        enabled: false
+      script:
+        - echo export BITBUCKET_DEPLOYMENT_ENVIRONMENT=${BITBUCKET_DEPLOYMENT_ENVIRONMENT} | tee -a deploymentEnvironment.env
+        - echo export BITBUCKET_BUILD_NUMBER=${BITBUCKET_BUILD_NUMBER} | tee -a deploymentEnvironment.env
+
+        - echo export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID} | tee -a deploymentEnvironment.env
+        - echo export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY} | tee -a deploymentEnvironment.env
+        - echo export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION} | tee -a deploymentEnvironment.env
+        - echo export AWS_PREFIX=${AWS_PREFIX} | tee -a deploymentEnvironment.env
+        - echo export AWS_BUCKET_NAME=${AWS_BUCKET_NAME} | tee -a deploymentEnvironment.env
+        - echo export AWS_CF_ID=${AWS_CF_ID_GP} | tee -a deploymentEnvironment.env
+        - echo export AWS_CF_ID=${AWS_CF_ID_DN} | tee -a deploymentEnvironment.env
+      artifacts:
+        - deploymentEnvironment.env
+  - .: &prepareComm
+      name: 'Commons: Pub Get & Build Runner'
+      caches:
+        - flutter
+      script:
+        - source deploymentEnvironment.env
+        - cat ssh-config >> ~/.ssh/config
+        - git config --global --add safe.directory /opt/flutter
+        - ( cd commons ; flutter pub get ; flutter pub run build_runner build )
+        - ( cd shared ; flutter pub get )
+      artifacts:
+        - deploymentEnvironment.env
+        - "commons/**"
+        - "shared/**"
+  - .: &buildGP
+      name: 'GP: Build'
+      caches:
+        - flutter
+      script:
+        - source deploymentEnvironment.env
+        - cat ssh-config >> ~/.ssh/config
+        - git config --global --add safe.directory /opt/flutter
+# we can directly build because commons and shared are already built and provided as artifacts
+        - ( cd app_gp ; flutter pub get ; flutter build web )
+      condition:
+        changesets:
+          includePaths:
+            - "app_gp/**"
+  - .: &buildDN
+      name: 'DN: Build'
+      caches:
+        - flutter
+      script:
+        - source deploymentEnvironment.env
+        - cat ssh-config >> ~/.ssh/config
+        - git config --global --add safe.directory /opt/flutter
+        - ( cd app_dn ; flutter pub get ; flutter build web )
+      condition:
+        changesets:
+          includePaths:
+            - "app_dn/**"
+  - .: &pubGP
+      caches:
+        - flutter
+      name: 'GP: Build -> Push'
+      script:
+        - source deploymentEnvironment.env
+        - cat ssh-config >> ~/.ssh/config
+        - git config --global --add safe.directory /opt/flutter
+        - ( cd app_gp ; sed -i -E "s/^(version:\s[[:digit:]]\.[[:digit:]]\.[[:digit:]]\+)([[:digit:]])/\1${BITBUCKET_BUILD_NUMBER}/g" pubspec.yaml )
+        - ( cd app_gp ; flutter pub get ; flutter build web --release ; sed -i "s/main.dart.js/main.dart.js?version=${BITBUCKET_BUILD_NUMBER}/" build/web/index.html )
+        - aws s3 sync ./app_gp/build/web s3://${AWS_BUCKET_NAME}/gp/${BITBUCKET_REPO_SLUG}/${BITBUCKET_BRANCH} --exclude ".git/*" --delete
+        # - aws s3 cp --cache-control max-age=0 ./build/service-worker.js s3://${AWS_BUCKET_NAME}/${BITBUCKET_REPO_SLUG}/${BITBUCKET_BRANCH}/service-worker.js
+        - aws cloudfront create-invalidation --distribution-id ${AWS_CF_ID_GP} --paths "/*"
+      condition:
+        changesets:
+          includePaths:
+            - "app_gp/**"
+  - .: &pubDN
+      caches:
+        - flutter
+      name: 'DN: Build -> Push'
+      script:
+        - source deploymentEnvironment.env
+        - cat ssh-config >> ~/.ssh/config
+        - git config --global --add safe.directory /opt/flutter
+        - ( cd app_dn ; sed -i -E "s/^(version:\s[[:digit:]]\.[[:digit:]]\.[[:digit:]]\+)([[:digit:]])/\1${BITBUCKET_BUILD_NUMBER}/g" pubspec.yaml )
+        - ( cd app_dn ; flutter pub get ; flutter build web --release ; sed -i "s/main.dart.js/main.dart.js?version=${BITBUCKET_BUILD_NUMBER}/" build/web/index.html )
+        - aws s3 sync ./app_dn/build/web s3://${AWS_BUCKET_NAME}/dn/${BITBUCKET_REPO_SLUG}/${BITBUCKET_BRANCH} --exclude ".git/*" --delete
+        # - aws s3 cp --cache-control max-age=0 ./build/service-worker.js s3://${AWS_BUCKET_NAME}/${BITBUCKET_REPO_SLUG}/${BITBUCKET_BRANCH}/service-worker.js
+        - aws cloudfront create-invalidation --distribution-id ${AWS_CF_ID_DN} --paths "/*"
+      condition:
+        changesets:
+          includePaths:
+            - "app_dn/**"
+pipelines:
+  branches:
+    master:
+      - step:
+          <<: *setupEnv
+          deployment: staging
+      - step:
+          <<: *prepareComm
+      - parallel:
+          - step:
+              <<: *buildGP
+          - step:
+              <<: *buildDN
+    release/staging:
+      - step:
+          <<: *setupEnv
+          deployment: staging
+      - step:
+          <<: *prepareComm
+      - parallel:
+          - step:
+              <<: *pubGP
+          - step:
+              <<: *pubDN
+#  pull-requests:
+#    feature/*:
+#      - step:
+#          <<: *setupEnv
+#          deployment: staging
+#      - step:
+#          <<: *prepareComm
+#      - step:
+#          <<: *buildGP
+
+definitions:
+  caches:
+    flutter: /opt/flutter/.pub-cache
