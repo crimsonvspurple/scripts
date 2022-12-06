@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # place this file inside /home/ubuntu/mongo_backup
-# add crontab (crontab -e; @daily /home/ubuntu/mongo_backup/mdump.sh)
-# Make sure to set chmod +x to mdump.sh
+# add crontab (crontab -e; @daily BASH_ENV=/etc/environment /home/ubuntu/mongo_backup/mdump.sh)
+# - set chmod +x to mdump.sh
+# - either set BASH_ENV properly or use a full path for `aws` or cron will not find aws executor
 
 # Requirements
 # 1. mongodump (apt get mongodb-org-tools)
